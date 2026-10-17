@@ -1,0 +1,395 @@
+# 40 operator questions about the cx-journey-warehouse (Jan to Jun 2025).
+#
+# Each question has:
+#   expects:   number | label        what the answer looks like (both agents are told)
+#   kind:      the scoring tolerance (rate, money, count, duration) or refuse
+#   gold_sql:  hand-written DuckDB SQL against the marts. Written independently of the
+#              semantic layer; tests/test_reference_plans.py checks that the governed
+#              reference plan returns the same answer, so gold and layer validate each other.
+#   reference: the governed request an ideal analyst would send (oracle run)
+#   trap:      why a plausible raw-SQL answer goes wrong (empty when there is no trap)
+#
+# Dates in the warehouse are contact-center local dates. "Q2" = April to June 2025.
+
+questions:
+  # ---------------------------------------------------------------- revenue funnel
+  - id: q01
+    category: funnel
+    question: How many unique leads did we receive in March 2025?
+    expects: number
+    kind: count
+    gold_sql: select count(*) from marts.fct_lead_journey where created_date between date '2025-03-01' and date '2025-03-31'
+    reference: {metrics: [unique_leads], start: "2025-03-01", end: "2025-03-31"}
+    trap: ""
+
+  - id: q02
+    category: funnel
+    question: What was our overall contact rate for leads created between January and June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select avg(case when is_contacted then 1.0 else 0 end) from marts.fct_lead_journey
+    reference: {metrics: [contact_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: Contact rate is per lead; computing it from dial attempts gives a much lower number.
+
+  - id: q03
+    category: funnel
+    question: What was the lead conversion rate for leads created in Q2 2025?
+    expects: number
+    kind: rate
+    gold_sql: select avg(case when is_sold then 1.0 else 0 end) from marts.fct_lead_journey where created_date between date '2025-04-01' and date '2025-06-30'
+    reference: {metrics: [conversion_rate], start: "2025-04-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q04
+    category: funnel
+    question: Which lead vendor had the highest conversion rate from January to June 2025?
+    expects: label
+    kind: label
+    gold_sql: select vendor_name from marts.fct_lead_journey group by 1 order by avg(case when is_sold then 1.0 else 0 end) desc limit 1
+    reference: {metrics: [conversion_rate], group_by: [vendor__vendor_name], order_by: {metric: conversion_rate, desc: true}, limit: 1}
+    trap: ""
+
+  - id: q05
+    category: funnel
+    question: What was the lead cost per sale for Clickstream Media from 15 March to 30 June 2025?
+    expects: number
+    kind: money
+    gold_sql: |
+      select
+        (select sum(spend_usd) from marts.fct_marketing_spend
+          where vendor_name = 'Clickstream Media' and spend_date between date '2025-03-15' and date '2025-06-30')
+        / (select sum(sold_count) from marts.fct_lead_journey
+          where vendor_name = 'Clickstream Media' and created_date between date '2025-03-15' and date '2025-06-30')
+    reference: {metrics: [cost_per_sale_usd], where: [{dimension: vendor__vendor_name, op: "=", value: Clickstream Media}], start: "2025-03-15", end: "2025-06-30"}
+    trap: Spend and sales live in different tables; both must be limited to the same window.
+
+  - id: q06
+    category: funnel
+    question: Which paid lead vendor had the highest lead cost per sale from 15 March to 30 June 2025?
+    expects: label
+    kind: label
+    gold_sql: |
+      with s as (select vendor_name, sum(spend_usd) spend from marts.fct_marketing_spend
+                 where spend_date between date '2025-03-15' and date '2025-06-30' group by 1),
+           l as (select vendor_name, sum(sold_count) sales from marts.fct_lead_journey
+                 where created_date between date '2025-03-15' and date '2025-06-30' group by 1)
+      select s.vendor_name from s join l using (vendor_name) order by spend / sales desc limit 1
+    reference: {metrics: [cost_per_sale_usd], group_by: [vendor__vendor_name], start: "2025-03-15", end: "2025-06-30", order_by: {metric: cost_per_sale_usd, desc: true}, limit: 1}
+    trap: The cheapest vendor per lead is the most expensive per sale.
+
+  - id: q07
+    category: funnel
+    question: What was the average speed to lead, in business minutes, for leads created in April 2025?
+    expects: number
+    kind: duration
+    gold_sql: select avg(speed_to_lead_business_minutes) from marts.fct_lead_journey where created_date between date '2025-04-01' and date '2025-04-30'
+    reference: {metrics: [avg_speed_to_lead_minutes], start: "2025-04-01", end: "2025-04-30"}
+    trap: Clock minutes include nights and Sundays; the business-minute column is the governed one.
+
+  - id: q08
+    category: funnel
+    question: What share of sales never became an active subscription, across January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(case when is_sold_not_activated then 1 else 0 end) * 1.0 / sum(sold_count) from marts.fct_lead_journey
+    reference: {metrics: [sold_not_activated_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: The denominator is sales, not leads.
+
+  - id: q09
+    category: funnel
+    question: What was the booked annual value of sales from leads created in May 2025?
+    expects: number
+    kind: money
+    gold_sql: select sum(won_amount_usd) from marts.fct_lead_journey where created_date between date '2025-05-01' and date '2025-05-31'
+    reference: {metrics: [booked_annual_value_usd], start: "2025-05-01", end: "2025-05-31"}
+    trap: ""
+
+  - id: q10
+    category: funnel
+    question: What was the activation rate of sales for leads created in February 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(activated_count) * 1.0 / sum(sold_count) from marts.fct_lead_journey where created_date between date '2025-02-01' and date '2025-02-28'
+    reference: {metrics: [activation_rate], start: "2025-02-01", end: "2025-02-28"}
+    trap: Activation rate is activations over sales, not over leads.
+
+  - id: q11
+    category: funnel
+    question: What share of all non-test lead records were duplicates, January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(duplicate_lead_count) * 1.0 / (sum(duplicate_lead_count) + count(*)) from marts.fct_lead_journey
+    reference: {metrics: [duplicate_lead_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: Duplicates are a count on the unique lead, so the denominator is duplicates plus unique leads.
+
+  - id: q12
+    category: funnel
+    question: What was the qualification rate (qualified leads out of contacted leads) for January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(qualified_count) * 1.0 / sum(contacted_count) from marts.fct_lead_journey
+    reference: {metrics: [qualification_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q13
+    category: funnel
+    question: Which site had the slower average speed to lead in June 2025?
+    expects: label
+    kind: label
+    gold_sql: select first_attempt_site from marts.fct_lead_journey where created_date between date '2025-06-01' and date '2025-06-30' and first_attempt_site is not null group by 1 order by avg(speed_to_lead_business_minutes) desc limit 1
+    reference: {metrics: [avg_speed_to_lead_minutes], group_by: [lead__first_attempt_site], start: "2025-06-01", end: "2025-06-30", order_by: {metric: avg_speed_to_lead_minutes, desc: true}, limit: 1}
+    trap: ""
+
+  - id: q14
+    category: funnel
+    question: What was the conversion rate for leads first dialed within 5 business minutes, January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select avg(case when is_sold then 1.0 else 0 end) from marts.fct_lead_journey where speed_to_lead_band = '0-5 min'
+    reference: {metrics: [conversion_rate], where: [{dimension: lead__speed_to_lead_band, op: "=", value: "0-5 min"}], start: "2025-01-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q15
+    category: funnel
+    question: How much did we spend on lead vendors in Q1 2025?
+    expects: number
+    kind: money
+    gold_sql: select sum(spend_usd) from marts.fct_marketing_spend where spend_date between date '2025-01-01' and date '2025-03-31'
+    reference: {metrics: [lead_spend_usd], start: "2025-01-01", end: "2025-03-31"}
+    trap: ""
+
+  - id: q16
+    category: funnel
+    question: In which month was the lead conversion rate lowest (by lead creation month)? Answer as YYYY-MM.
+    expects: label
+    kind: label
+    gold_sql: select strftime(date_trunc('month', created_date), '%Y-%m') from marts.fct_lead_journey group by 1 order by avg(case when is_sold then 1.0 else 0 end) asc limit 1
+    reference: {metrics: [conversion_rate], group_by: [metric_time__month], order_by: {metric: conversion_rate, desc: false}, limit: 1}
+    trap: Conversion by close month mixes lead cohorts; by creation month follows each lead.
+
+  # ---------------------------------------------------------------- customer experience
+  - id: q17
+    category: cx
+    question: How many customer contacts did we have in March 2025, across all channels?
+    expects: number
+    kind: count
+    gold_sql: select count(*) from marts.fct_contacts where contact_date between date '2025-03-01' and date '2025-03-31'
+    reference: {metrics: [contacts], start: "2025-03-01", end: "2025-03-31"}
+    trap: ""
+
+  - id: q18
+    category: cx
+    question: What was the average handle time, in seconds, for agent-handled contacts in April 2025?
+    expects: number
+    kind: duration
+    gold_sql: select sum(agent_handle_seconds) * 1.0 / count(*) from marts.fct_contacts where is_agent_handled and contact_date between date '2025-04-01' and date '2025-04-30'
+    reference: {metrics: [aht_seconds], start: "2025-04-01", end: "2025-04-30"}
+    trap: AHT includes wrap time and is per contact; averaging talk time per leg understates it.
+
+  - id: q19
+    category: cx
+    question: What was our first-contact resolution rate from January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(fcr_resolved_count) * 1.0 / sum(fcr_eligible_count) from marts.fct_contacts
+    reference: {metrics: [fcr_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: FCR is outcome-based (no repeat within 7 days) and excludes contacts younger than 7 days; the agent's resolved flag overstates it.
+
+  - id: q20
+    category: cx
+    question: What was the bot's containment rate from January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(bot_contained_count) * 1.0 / sum(bot_session_count) from marts.fct_contacts
+    reference: {metrics: [bot_containment_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q21
+    category: cx
+    question: What share of bot sessions actually resolved the customer's issue, January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(bot_contained_resolved_count) * 1.0 / sum(bot_session_observable_count) from marts.fct_contacts
+    reference: {metrics: [bot_true_resolution_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: Containment is not resolution; the answer must require containment and no repeat, over observable sessions.
+
+  - id: q22
+    category: cx
+    question: Which contact driver (most detailed level) has the lowest bot true resolution rate?
+    expects: label
+    kind: label
+    gold_sql: |
+      select d.driver_l3 from marts.fct_contacts c join marts.dim_contact_driver d using (intent_code)
+      group by 1 having sum(c.bot_session_observable_count) > 0
+      order by sum(c.bot_contained_resolved_count) * 1.0 / sum(c.bot_session_observable_count) asc limit 1
+    reference: {metrics: [bot_true_resolution_rate], group_by: [contact_driver__driver_l3], order_by: {metric: bot_true_resolution_rate, desc: false}, limit: 1}
+    trap: ""
+
+  - id: q23
+    category: cx
+    question: What was the repeat contact rate from January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(repeat_contact_count) * 1.0 / sum(resolution_eligible_count) from marts.fct_contacts
+    reference: {metrics: [repeat_contact_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q24
+    category: cx
+    question: What was the total cost to serve customer contacts in May 2025?
+    expects: number
+    kind: money
+    gold_sql: select sum(cost_to_serve_usd) from marts.fct_contacts where contact_date between date '2025-05-01' and date '2025-05-31'
+    reference: {metrics: [cost_to_serve_usd], start: "2025-05-01", end: "2025-05-31"}
+    trap: ""
+
+  - id: q25
+    category: cx
+    question: What was the cost per contact in June 2025?
+    expects: number
+    kind: money
+    gold_sql: select sum(cost_to_serve_usd) / count(*) from marts.fct_contacts where contact_date between date '2025-06-01' and date '2025-06-30'
+    reference: {metrics: [cost_per_contact_usd], start: "2025-06-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q26
+    category: cx
+    question: What share of contacting customers cancelled within 30 days of the contact, January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: |
+      select sum(case when is_churn_observable and not is_abandoned and cancelled_within_30d then 1 else 0 end) * 1.0
+           / sum(case when is_churn_observable and not is_abandoned then 1 else 0 end)
+      from marts.fct_contacts
+    reference: {metrics: [churn_after_contact_rate], start: "2025-01-01", end: "2025-06-30"}
+    trap: Contacts in the last 30 days of data cannot show a cancellation yet and must be excluded.
+
+  - id: q27
+    category: cx
+    question: Which top-level contact driver category had the most contacts from January to June 2025?
+    expects: label
+    kind: label
+    gold_sql: select d.driver_l1 from marts.fct_contacts c join marts.dim_contact_driver d using (intent_code) group by 1 order by count(*) desc limit 1
+    reference: {metrics: [contacts], group_by: [contact_driver__driver_l1], order_by: {metric: contacts, desc: true}, limit: 1}
+    trap: ""
+
+  - id: q28
+    category: cx
+    question: What was the resolution rate for Billing contacts (all channels), January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: |
+      select sum(c.resolved_count) * 1.0 / sum(c.resolution_eligible_count)
+      from marts.fct_contacts c join marts.dim_contact_driver d using (intent_code) where d.driver_l1 = 'Billing'
+    reference: {metrics: [resolution_rate], where: [{dimension: contact_driver__driver_l1, op: "=", value: Billing}], start: "2025-01-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q29
+    category: cx
+    question: How many bot sessions did we have in Q2 2025?
+    expects: number
+    kind: count
+    gold_sql: select sum(bot_session_count) from marts.fct_contacts where contact_date between date '2025-04-01' and date '2025-06-30'
+    reference: {metrics: [bot_sessions], start: "2025-04-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q30
+    category: cx
+    question: Which handling path (agent, bot only, bot then agent, abandoned) had the highest cost per contact?
+    expects: label
+    kind: label
+    gold_sql: select handling_path from marts.fct_contacts group by 1 order by sum(cost_to_serve_usd) / count(*) desc limit 1
+    reference: {metrics: [cost_per_contact_usd], group_by: [contact__handling_path], order_by: {metric: cost_per_contact_usd, desc: true}, limit: 1}
+    trap: ""
+
+  - id: q31
+    category: cx
+    question: How many agent-handled contacts ended in the Tech Support queue in March 2025?
+    expects: number
+    kind: count
+    gold_sql: select count(*) from marts.fct_contacts where is_agent_handled and last_queue_name = 'Tech Support' and contact_date between date '2025-03-01' and date '2025-03-31'
+    reference: {metrics: [agent_handled_contacts], where: [{dimension: contact__last_queue_name, op: "=", value: Tech Support}], start: "2025-03-01", end: "2025-03-31"}
+    trap: ""
+
+  # ---------------------------------------------------------------- workforce
+  - id: q32
+    category: workforce
+    question: What was schedule adherence for Phoenix agents in Q1 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(adherent_minutes) * 1.0 / sum(scheduled_minutes) from marts.fct_agent_day where site = 'Phoenix' and work_date between date '2025-01-01' and date '2025-03-31'
+    reference: {metrics: [schedule_adherence], where: [{dimension: agent_day__site, op: "=", value: Phoenix}], start: "2025-01-01", end: "2025-03-31"}
+    trap: Adherence is total adherent over total scheduled minutes, not an average of daily percentages.
+
+  - id: q33
+    category: workforce
+    question: What was total agent labor cost from January to June 2025?
+    expects: number
+    kind: money
+    gold_sql: select sum(labor_cost_usd) from marts.fct_agent_day
+    reference: {metrics: [labor_cost_usd], start: "2025-01-01", end: "2025-06-30"}
+    trap: ""
+
+  - id: q34
+    category: workforce
+    question: How many sales per paid hour did tier 1 agents make from January to June 2025?
+    expects: number
+    kind: rate
+    gold_sql: select sum(sales) * 1.0 / sum(paid_hours) from marts.fct_agent_day where tier = 1
+    reference: {metrics: [sales_per_paid_hour], where: [{dimension: agent_day__tier, op: "=", value: "1"}], start: "2025-01-01", end: "2025-06-30"}
+    trap: Tier is as of the work date (agents get promoted), not the agent's current tier.
+
+  - id: q35
+    category: workforce
+    question: Which site had the lower schedule adherence from January to June 2025?
+    expects: label
+    kind: label
+    gold_sql: select site from marts.fct_agent_day group by 1 order by sum(adherent_minutes) * 1.0 / sum(scheduled_minutes) asc limit 1
+    reference: {metrics: [schedule_adherence], group_by: [agent_day__site], order_by: {metric: schedule_adherence, desc: false}, limit: 1}
+    trap: ""
+
+  # ---------------------------------------------------------------- not answerable
+  - id: q36
+    category: unanswerable
+    question: What was our Net Promoter Score in March 2025?
+    expects: number
+    kind: refuse
+    gold_sql: ""
+    reference: {refuse: true}
+    trap: There is no survey data in the warehouse.
+
+  - id: q37
+    category: unanswerable
+    question: What is the average order value of equipment purchases in Q2 2025?
+    expects: number
+    kind: refuse
+    gold_sql: ""
+    reference: {refuse: true}
+    trap: There are no equipment sales; won_amount_usd is subscription value.
+
+  - id: q38
+    category: unanswerable
+    question: How many website visitors did we have in May 2025?
+    expects: number
+    kind: refuse
+    gold_sql: ""
+    reference: {refuse: true}
+    trap: No web analytics data exists.
+
+  - id: q39
+    category: unanswerable
+    question: Which site has the higher employee satisfaction score?
+    expects: label
+    kind: refuse
+    gold_sql: ""
+    reference: {refuse: true}
+    trap: No employee survey data exists.
+
+  - id: q40
+    category: unanswerable
+    question: What was the conversion rate of our Facebook campaign in Q1 2025?
+    expects: number
+    kind: refuse
+    gold_sql: ""
+    reference: {refuse: true}
+    trap: There is no Facebook campaign; campaigns are Q1 Acquisition, Spring Speed Promo, Win-back and Fiber Launch.
